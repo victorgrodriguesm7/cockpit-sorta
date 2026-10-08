@@ -296,7 +296,15 @@
   for (const id of ["season-input", "episode-input", "rename-input", "new-input"]) el(id).addEventListener("change", invalidatePreview);
   el("tmdb-search-form").addEventListener("submit", event => {
     event.preventDefault();
-    action(async () => renderSearchResults(await api("search", { query: el("tmdb-query").value })));
+    action(async () => {
+      const results = el("tmdb-results");
+      results.replaceChildren(node("p", "empty", "Buscando no TMDB…"));
+      try { renderSearchResults(await api("search", { query: el("tmdb-query").value })); }
+      catch (error) {
+        results.replaceChildren(node("p", "empty search-error", error.message || String(error)));
+        throw error;
+      }
+    });
   });
   el("preview-button").addEventListener("click", () => action(async () => {
     invalidatePreview();

@@ -1,6 +1,7 @@
 import hashlib
 import contextlib
 import json
+import socket
 import sqlite3
 import tempfile
 import unittest
@@ -30,6 +31,34 @@ SEASON = {"episodes": [
 
 
 class HelperTests(unittest.TestCase):
+    def test_tmdb_connection_prefers_ipv4_and_falls_back_to_ipv6(self):
+        attempts = []
+
+        class FakeSocket:
+            def __init__(self, family):
+                self.family = family
+
+            def settimeout(self, _timeout):
+                pass
+
+            def connect(self, _target):
+                attempts.append(self.family)
+                if self.family == socket.AF_INET:
+                    raise OSError("IPv4 unavailable")
+
+            def close(self):
+                pass
+
+        def addresses(_host, _port, family, _kind):
+            target = ("192.0.2.1", 443) if family == socket.AF_INET else ("2001:db8::1", 443, 0, 0)
+            return [(family, socket.SOCK_STREAM, 0, "", target)]
+
+        with mock.patch.object(helper.socket, "getaddrinfo", side_effect=addresses), \
+             mock.patch.object(helper.socket, "socket", side_effect=lambda family, _kind, _proto: FakeSocket(family)):
+            connection = helper.ipv4_first_connection(("api.themoviedb.org", 443), 5)
+        self.assertEqual(attempts, [socket.AF_INET, socket.AF_INET6])
+        self.assertEqual(connection.family, socket.AF_INET6)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=Path(__file__).resolve().parents[1])
         self.addCleanup(self.temp.cleanup)

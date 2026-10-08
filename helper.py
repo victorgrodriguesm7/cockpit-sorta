@@ -6,9 +6,11 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import hashlib
+import http.client
 import json
 import os
 import re
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -43,6 +45,44 @@ MIGRATIONS = Path(__file__).resolve().parent / "migrations"
 
 class SortaError(Exception):
     pass
+
+
+def ipv4_first_connection(address: tuple[str, int], timeout: object, source_address: tuple[str, int] | None = None) -> socket.socket:
+    """Avoid broken IPv6 routes while retaining IPv6 as a fallback."""
+    errors: list[OSError] = []
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            addresses = socket.getaddrinfo(address[0], address[1], family, socket.SOCK_STREAM)
+        except OSError as exc:
+            errors.append(exc)
+            continue
+        for family, kind, proto, _, target in addresses:
+            sock = socket.socket(family, kind, proto)
+            try:
+                if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                    sock.settimeout(timeout)
+                if source_address:
+                    sock.bind(source_address)
+                sock.connect(target)
+                return sock
+            except OSError as exc:
+                errors.append(exc)
+                sock.close()
+    raise errors[-1] if errors else OSError("Nenhum endereço disponível para conexão.")
+
+
+class IPv4FirstHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._create_connection = ipv4_first_connection
+
+
+class IPv4FirstHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, request: urllib.request.Request):
+        return self.do_open(IPv4FirstHTTPSConnection, request, context=self._context)
+
+
+TMDB_OPENER = urllib.request.build_opener(IPv4FirstHTTPSHandler())
 
 
 def utc_now() -> str:
@@ -357,7 +397,7 @@ def tmdb_json(endpoint: str, key: str, **params: str | int) -> dict[str, Any]:
     url = f"https://api.themoviedb.org/3/{endpoint}?{query}"
     request = urllib.request.Request(url, headers={"User-Agent": "Cockpit-Sorta/0.1", "Accept": "application/json"})
     try:
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with TMDB_OPENER.open(request, timeout=20) as response:
             return json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
@@ -545,7 +585,7 @@ def download_poster(url: str | None) -> bytes | None:
     if not url:
         return None
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": "Cockpit-Sorta/0.1"}), timeout=15) as response:
+        with TMDB_OPENER.open(urllib.request.Request(url, headers={"User-Agent": "Cockpit-Sorta/0.1"}), timeout=15) as response:
             data = response.read(5_000_001)
         return data if len(data) <= 5_000_000 else None
     except (urllib.error.URLError, TimeoutError):
