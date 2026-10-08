@@ -1,4 +1,5 @@
 import hashlib
+import contextlib
 import json
 import sqlite3
 import tempfile
@@ -89,7 +90,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue((target / "A Origem [tmdb-27205].pt-BR.srt").exists())
         self.assertTrue((incoming / "outro.srt").exists())
         self.assertEqual(helper.scan(self.root)["pending"], 0)
-        with sqlite3.connect(self.root / "sorta.db") as conn:
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
             row = conn.execute("SELECT media_type,folder_path,is_new,catalogued_at FROM media").fetchone()
             self.assertEqual(row[:3], ("movie", "Movies/Ação/A Origem [tmdb-27205]", 0))
             self.assertTrue(row[3].endswith("Z"))
@@ -110,7 +111,7 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(preview["moves"][1]["to"].endswith("S01E02.Segundo.mkv"))
         helper.organize(self.root_id, {**request, "token": preview["token"]})
         self.assertEqual(helper.scan(self.root)["pending"], 0)
-        with sqlite3.connect(self.root / "sorta.db") as conn:
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
             rows = conn.execute("SELECT season_number,episode_number,title,file_path FROM episodes ORDER BY episode_number").fetchall()
             self.assertEqual([row[2] for row in rows], ["Piloto", "Segundo"])
             self.assertTrue(all(row[3].startswith("Series/Série Teste [tmdb-1399]/Season 1/") for row in rows))
@@ -119,7 +120,7 @@ class HelperTests(unittest.TestCase):
         next_preview = helper.plan(self.root, next_request)
         self.assertIsNotNone(next_preview["existing_media_id"])
         helper.organize(self.root_id, {**next_request, "token": next_preview["token"]})
-        with sqlite3.connect(self.root / "sorta.db") as conn:
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM media").fetchone()[0], 1)
             self.assertEqual(conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0], 3)
 

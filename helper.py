@@ -207,6 +207,7 @@ def init_db(root: Path) -> sqlite3.Connection:
     fd, name = tempfile.mkstemp(prefix=".sorta-new-", suffix=".db", dir=root)
     os.close(fd)
     temporary = Path(name)
+    conn = None
     try:
         conn = sqlite3.connect(temporary)
         conn.execute("PRAGMA foreign_keys=ON")
@@ -223,6 +224,7 @@ def init_db(root: Path) -> sqlite3.Connection:
         if conn.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise SortaError("Falha ao criar o banco SQLite.")
         conn.close()
+        conn = None
         if dest.exists():
             raise SortaError("O banco foi criado por outro programa. Tente novamente.")
         os.replace(temporary, dest)
@@ -230,6 +232,8 @@ def init_db(root: Path) -> sqlite3.Connection:
         assert opened is not None
         return opened
     finally:
+        if conn is not None:
+            conn.close()
         if temporary.exists():
             temporary.unlink()
 
@@ -524,7 +528,7 @@ def backup_db(root: Path, root_id: str) -> str | None:
     target = CONFIG.parent / "backups" / root_id
     target.mkdir(parents=True, exist_ok=True, mode=0o700)
     dest = target / f"sorta-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}.db"
-    with sqlite3.connect(source) as old, sqlite3.connect(dest) as copy:
+    with contextlib.closing(sqlite3.connect(source)) as old, contextlib.closing(sqlite3.connect(dest)) as copy:
         old.backup(copy)
     os.chmod(dest, 0o600)
     return str(dest)
