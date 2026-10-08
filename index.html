@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sorta · Mídia</title>
+  <link rel="stylesheet" href="sorta.css">
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div><p class="eyebrow">HOMELAB · CATÁLOGO</p><h1>Sorta</h1><p class="subtitle">Organize filmes e séries nos seus discos.</p></div>
+      <button id="settings-toggle" class="secondary" type="button" aria-expanded="false">Discos e TMDB</button>
+    </header>
+
+    <p id="notice" class="notice" role="status" hidden></p>
+    <p id="error" class="notice error" role="alert" hidden></p>
+
+    <section id="settings" class="panel settings" hidden aria-label="Configurações">
+      <div class="settings-grid">
+        <div>
+          <h2>Pastas monitoradas</h2>
+          <p class="help">Cada pasta tem seu próprio <code>sorta.db</code>. Selecione o disco montado e informe a pasta dentro dele.</p>
+          <div id="registered-roots" class="registered-roots"></div>
+          <form id="add-root-form" class="form-stack">
+            <label>Disco montado <select id="disk-select" required></select></label>
+            <label>Pasta dentro do disco <input id="folder-input" value="Midia" placeholder="Midia" required></label>
+            <label>Nome no menu <input id="label-input" value="HD 500 GB · Midia" required></label>
+            <button type="submit">Adicionar pasta</button>
+          </form>
+        </div>
+        <div>
+          <h2>TMDB</h2>
+          <p class="help">A chave fica na configuração do usuário no servidor. Ela não é salva no navegador nem no HD de mídia.</p>
+          <p id="key-status" class="status"></p>
+          <form id="key-form" class="form-stack">
+            <label>Chave API v3 <input id="key-input" type="password" autocomplete="off" placeholder="Cole sua chave TMDB"></label>
+            <button type="submit">Salvar chave</button>
+          </form>
+        </div>
+      </div>
+    </section>
+
+    <section class="toolbar panel" aria-label="Selecionar catálogo">
+      <label>Catálogo <select id="root-select"></select></label>
+      <div class="toolbar-actions"><span id="mount-status" class="status"></span><button id="scan-button" type="button">Varrer pasta</button></div>
+    </section>
+
+    <section id="recovery" class="panel recovery" hidden>
+      <div><h2>Operação interrompida</h2><p>Há uma movimentação pendente neste catálogo. Recupere-a antes de organizar mais arquivos.</p></div>
+      <button id="recover-button" type="button">Recuperar</button>
+    </section>
+
+    <section class="stats" aria-label="Resumo da varredura">
+      <div class="stat"><span>Vídeos encontrados</span><strong id="total-count">—</strong></div>
+      <div class="stat"><span>Catalogados</span><strong id="linked-count">—</strong></div>
+      <div class="stat accent"><span>Pendentes</span><strong id="pending-count">—</strong></div>
+    </section>
+
+    <div class="content-grid">
+      <section class="panel files-panel" aria-labelledby="files-title">
+        <div class="section-heading"><div><h2 id="files-title">Arquivos pendentes</h2><p id="scan-summary" class="help">Selecione um catálogo para começar.</p></div><span id="selected-count" class="pill">0 selecionados</span></div>
+        <label class="search-label">Filtrar arquivos <input id="file-filter" type="search" placeholder="Nome ou pasta"></label>
+        <div id="file-list" class="file-list"></div>
+        <div class="pager"><button id="prev-page" class="secondary" type="button">Anterior</button><span id="page-label"></span><button id="next-page" class="secondary" type="button">Próxima</button></div>
+      </section>
+
+      <section class="panel editor" aria-labelledby="editor-title">
+        <h2 id="editor-title">Organizar seleção</h2>
+        <p class="help">Para séries, marque os vídeos na ordem dos episódios. Ajuste a ordem abaixo, se necessário.</p>
+        <div id="selection-list" class="selection-list"></div>
+        <form id="tmdb-search-form" class="inline-form">
+          <label>Buscar no TMDB <input id="tmdb-query" type="search" placeholder="Título do filme ou série" required></label>
+          <button type="submit">Buscar</button>
+        </form>
+        <div id="tmdb-results" class="tmdb-results"></div>
+        <div id="chosen-media" class="chosen-media" hidden></div>
+        <div class="episode-options">
+          <label>Temporada <input id="season-input" type="number" min="0" max="999" value="1"></label>
+          <label>Primeiro episódio <input id="episode-input" type="number" min="0" max="9999" value="1"></label>
+          <label class="checkline"><input id="rename-input" type="checkbox" checked> Renomear episódios</label>
+          <label class="checkline"><input id="new-input" type="checkbox"> Marcar como novo</label>
+        </div>
+        <button id="preview-button" type="button" disabled>Pré-visualizar organização</button>
+        <div id="preview" class="preview" hidden></div>
+        <button id="organize-button" class="primary" type="button" hidden>Confirmar e organizar</button>
+      </section>
+    </div>
+    <footer>Os arquivos ficam no disco selecionado. O catálogo é salvo em <code>sorta.db</code> na raiz da pasta monitorada.</footer>
+  </main>
+  <script src="../base1/cockpit.js"></script>
+  <script src="sorta.js"></script>
+</body>
+</html>

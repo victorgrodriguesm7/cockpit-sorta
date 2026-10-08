@@ -1,0 +1,10 @@
+{
+  "version": 0,
+  "menu": {
+    "sorta": {
+      "label": "Sorta · Mídia",
+      "order": 62,
+      "path": "index.html"
+    }
+  }
+}
