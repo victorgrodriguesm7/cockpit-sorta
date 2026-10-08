@@ -412,6 +412,15 @@ def check_conflicts(moves: list[dict[str, str]]) -> None:
 
 
 def plan(root: Path, request: dict[str, Any]) -> dict[str, Any]:
+    conn = db_connect(root, readonly=True)
+    try:
+        return _plan(root, request, conn)
+    finally:
+        if conn:
+            conn.close()
+
+
+def _plan(root: Path, request: dict[str, Any], conn: sqlite3.Connection | None) -> dict[str, Any]:
     kind = request.get("media_type")
     tmdb_id = request.get("tmdb_id")
     sources = request.get("sources")
@@ -424,9 +433,7 @@ def plan(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     if len(set(sources)) != len(sources):
         raise SortaError("A seleção contém arquivos repetidos.")
     files = [resolve_file(root, source) for source in sources]
-    conn = db_connect(root, readonly=True)
     if conn and db_version(conn) != SCHEMA_VERSION:
-        conn.close()
         raise SortaError(f"Banco com esquema diferente de {SCHEMA_VERSION}. Abra este disco no Sorta desktop atualizado antes de organizar.")
     labels = db_labels(conn)
     key = config().get("tmdb_key", "")
@@ -498,8 +505,6 @@ def plan(root: Path, request: dict[str, Any]) -> dict[str, Any]:
         moves.append({"from": str(source), "to": str(target)})
         moves.extend(sidecar_moves(source, target))
     check_conflicts(moves)
-    if conn:
-        conn.close()
     stats = [{"path": source.relative_to(root).as_posix(), "size": source.stat().st_size,
               "mtime_ns": source.stat().st_mtime_ns} for source in files]
     runtime = details.get("runtime") if kind == "movie" else next(iter(details.get("episode_run_time") or []), None)
