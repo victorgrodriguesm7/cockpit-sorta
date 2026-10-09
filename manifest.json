@@ -1,5 +1,6 @@
 {
   "version": 0,
+  "content-security-policy": "img-src 'self' data: https://image.tmdb.org",
   "menu": {
     "sorta": {
       "label": "Sorta · Mídia",
