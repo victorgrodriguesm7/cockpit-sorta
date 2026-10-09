@@ -10,7 +10,7 @@
   <main>
     <header class="topbar">
       <div><p class="eyebrow">HOMELAB · CATÁLOGO</p><h1>Sorta</h1><p class="subtitle">Organize filmes e séries nos seus discos.</p></div>
-      <button id="settings-toggle" class="secondary" type="button" aria-expanded="false">Discos e TMDB</button>
+      <button id="settings-toggle" class="secondary" type="button" aria-expanded="false">Discos, TMDB e traduções</button>
     </header>
 
     <p id="notice" class="notice" role="status" hidden></p>
@@ -39,6 +39,16 @@
           </form>
         </div>
       </div>
+      <section class="catalog-preferences" aria-labelledby="translations-title">
+        <h3 id="translations-title">Traduções deste catálogo</h3>
+        <p class="help">Os nomes são salvos no banco do disco selecionado. Pastas de filmes e temporadas já catalogadas serão renomeadas quando necessário.</p>
+        <form id="season-label-form" class="inline-form">
+          <label>Nome da pasta de temporada <input id="season-label-input" type="text" maxlength="80" placeholder="Temporada" required></label>
+          <button type="submit">Salvar</button>
+        </form>
+        <h3>Gêneros conhecidos</h3>
+        <div id="genre-translation-list" class="genre-translation-list"></div>
+      </section>
     </section>
 
     <section class="toolbar panel" aria-label="Selecionar catálogo">
@@ -51,6 +61,12 @@
       <button id="recover-button" type="button">Recuperar</button>
     </section>
 
+    <nav class="tabs" aria-label="Visões do catálogo">
+      <button id="tab-pending" class="tab active" type="button" aria-current="page">Pendentes</button>
+      <button id="tab-catalog" class="tab" type="button">Catálogo</button>
+    </nav>
+
+    <section id="pending-pane">
     <section class="stats" aria-label="Resumo da varredura">
       <div class="stat"><span>Vídeos encontrados</span><strong id="total-count">—</strong></div>
       <div class="stat"><span>Catalogados</span><strong id="linked-count">—</strong></div>
@@ -86,6 +102,19 @@
         <button id="organize-button" class="primary" type="button" hidden>Confirmar e organizar</button>
       </section>
     </div>
+    </section>
+
+    <section id="catalog-pane" hidden>
+      <div class="catalog-layout">
+        <section class="panel catalog-browser" aria-labelledby="catalog-title">
+          <div class="section-heading"><div><h2 id="catalog-title">Mídias catalogadas</h2><p id="catalog-summary" class="help">Selecione um catálogo para começar.</p></div><button id="catalog-refresh" class="secondary" type="button">Atualizar</button></div>
+          <label class="search-label">Filtrar catálogo <input id="catalog-filter" type="search" placeholder="Título ou gênero"></label>
+          <div id="catalog-grid" class="catalog-grid"></div>
+          <div class="pager"><button id="catalog-prev" class="secondary" type="button">Anterior</button><span id="catalog-page-label"></span><button id="catalog-next" class="secondary" type="button">Próxima</button></div>
+        </section>
+        <section id="catalog-detail" class="panel catalog-detail" aria-label="Detalhes da mídia"><p class="empty">Selecione uma mídia para ver o pôster e editar os gêneros.</p></section>
+      </div>
+    </section>
     <footer>Os arquivos ficam no disco selecionado. O catálogo é salvo em <code>sorta.db</code> na raiz da pasta monitorada.</footer>
   </main>
   <script src="../base1/cockpit.js"></script>

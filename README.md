@@ -9,6 +9,9 @@ Página do Cockpit para encontrar vídeos pendentes e catalogar filmes e séries
 - Busca filmes e séries no TMDB, mostra o destino e os arquivos associados (legendas e `.nfo`) antes de mover. Séries aceitam vários episódios em ordem, temporada e número inicial; a renomeação é opcional.
 - Grava o esquema v4 de `sorta.db`, metadados, gêneros, episódios, pôster principal quando disponível e `manifest.json`. Um banco existente de versão diferente precisa ser migrado primeiro pelo Sorta desktop.
 - Salva cópia SQLite do banco existente no SSD do usuário antes de organizar. Uma operação interrompida gera aviso e pode ser recuperada pela tela.
+- A aba **Catálogo** lista filmes e séries do `sorta.db`, mostra primeiro o pôster local indicado por `poster_path` e usa o endereço TMDB salvo no banco quando o arquivo local não está disponível.
+- Permite adicionar ou remover gêneros de uma mídia e escolher o principal. O principal aparece primeiro; os demais são exibidos alfabeticamente no Cockpit. O banco grava somente `is_primary`, como no Sorta desktop.
+- Em **Discos, TMDB e traduções**, permite renomear gêneros conhecidos e o prefixo da pasta de temporada para o catálogo selecionado. Mudanças que afetam pastas existentes mostram uma prévia, criam backup do banco, movem as pastas e atualizam os caminhos no SQLite. Uma edição interrompida pode ser recuperada na tela.
 
 Os arquivos SQL foram copiados sem mudanças de `sorta` na revisão `56939029402b734a268a2ec718dca1aea228b4dc` (migrações 0001–0004). O documento `docs/disk-format.md` desse commit ainda descreve o esquema v3, mas o código e a migração 0004 usam a versão 4 e incluem episódios, `catalogued_at` e `is_new`. O helper usa a versão 4 e registra os checksums SHA-384 na tabela `_sqlx_migrations` para compatibilidade com o `sqlx` do desktop.
 

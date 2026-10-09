@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import contextlib
 import json
@@ -79,6 +80,11 @@ class HelperTests(unittest.TestCase):
 
     @staticmethod
     def tmdb(endpoint, _key, **_params):
+        if endpoint == "genre/movie/list":
+            return {"genres": [{"id": 28, "name": "Ação"}, {"id": 878, "name": "Ficção científica"},
+                               {"id": 35, "name": "Comédia"}]}
+        if endpoint == "genre/tv/list":
+            return {"genres": [{"id": 18, "name": "Drama"}]}
         if endpoint == "movie/27205":
             return MOVIE
         if endpoint == "tv/1399":
@@ -222,6 +228,130 @@ class HelperTests(unittest.TestCase):
         result = helper.recover(self.root_id)
         self.assertEqual(result["status"], "committed")
         self.assertTrue((self.root / preview["moves"][0]["to"]).exists())
+
+    def test_catalog_reads_local_poster_and_sorts_secondary_genres(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        helper.organize(self.root_id, {**request, "token": preview["token"]})
+        (self.root / "poster").mkdir()
+        (self.root / "poster" / "27205.jpg").write_bytes(b"fake-jpeg")
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
+            conn.execute("UPDATE media SET poster_path='poster/27205.jpg', poster_url='https://image.tmdb.org/t/p/w500/test.jpg'")
+            conn.commit()
+        library = helper.catalog_library(self.root)
+        self.assertEqual(library["total"], 1)
+        media = library["media"][0]
+        self.assertEqual([g["id"] for g in media["genres"]], [28, 878])
+        self.assertTrue(media["genres"][0]["is_primary"])
+        poster = helper.catalog_poster(self.root, media["id"])
+        self.assertTrue(poster["local"])
+        self.assertEqual(base64.b64decode(poster["src"].split(",", 1)[1]), b"fake-jpeg")
+
+    def test_primary_genre_change_moves_movie_and_updates_catalog(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        result = helper.organize(self.root_id, {**request, "token": preview["token"]})
+        edit = {"kind": "media-genres", "media_id": result["media_id"], "genre_ids": [878, 28]}
+        edit_preview = helper.preview_edit(self.root, edit)
+        self.assertEqual(len(edit_preview["moves"]), 1)
+        applied = helper.apply_edit(self.root_id, {**edit, "token": edit_preview["token"]})
+        self.assertEqual(applied["moved_folders"], 1)
+        item = helper.catalog_library(self.root)["media"][0]
+        self.assertTrue(item["folder_path"].startswith("Movies/Ficção científica/"))
+        self.assertEqual([g["id"] for g in item["genres"]], [878, 28])
+        self.assertEqual(helper.scan(self.root)["pending"], 0)
+        self.assertTrue((self.root / item["folder_path"]).is_dir())
+
+    def test_catalog_can_add_and_remove_tmdb_genres(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        result = helper.organize(self.root_id, {**request, "token": preview["token"]})
+        add = {"kind": "media-genres", "media_id": result["media_id"], "genre_ids": [28, 35, 878]}
+        helper.apply_edit(self.root_id, {**add, "token": helper.preview_edit(self.root, add)["token"]})
+        genres = helper.catalog_library(self.root)["media"][0]["genres"]
+        self.assertEqual([g["id"] for g in genres], [28, 35, 878])
+        self.assertEqual(genres[1]["canonical_name"], "Comédia")
+        remove = {"kind": "media-genres", "media_id": result["media_id"], "genre_ids": [35, 878]}
+        helper.apply_edit(self.root_id, {**remove, "token": helper.preview_edit(self.root, remove)["token"]})
+        item = helper.catalog_library(self.root)["media"][0]
+        self.assertEqual([g["id"] for g in item["genres"]], [35, 878])
+        self.assertTrue(item["folder_path"].startswith("Movies/Comédia/"))
+        self.assertEqual(helper.scan(self.root)["pending"], 0)
+
+    def test_catalog_edit_rejects_existing_destination(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        result = helper.organize(self.root_id, {**request, "token": preview["token"]})
+        collision = self.root / "Movies" / "Ficção científica" / "A Origem [tmdb-27205]"
+        collision.mkdir(parents=True)
+        edit = {"kind": "media-genres", "media_id": result["media_id"], "genre_ids": [878, 28]}
+        with self.assertRaisesRegex(helper.SortaError, "Destino já existe"):
+            helper.preview_edit(self.root, edit)
+        item = helper.catalog_library(self.root)["media"][0]
+        self.assertTrue(item["folder_path"].startswith("Movies/Ação/"))
+
+    def test_genre_translation_moves_movie_and_preserves_compatibility(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        helper.organize(self.root_id, {**request, "token": preview["token"]})
+        edit = {"kind": "genre-translation", "genre_id": 28, "media_type": "movie", "translated": "Aventura"}
+        edit_preview = helper.preview_edit(self.root, edit)
+        helper.apply_edit(self.root_id, {**edit, "token": edit_preview["token"]})
+        item = helper.catalog_library(self.root)["media"][0]
+        self.assertTrue(item["folder_path"].startswith("Movies/Aventura/"))
+        self.assertEqual(item["genres"][0]["translated_name"], "Aventura")
+        self.assertEqual(helper.scan(self.root)["pending"], 0)
+        self.assertEqual(len(helper.catalog_settings(self.root)["genres"]), 2)
+
+    def test_season_translation_updates_episode_paths(self):
+        (self.root / "episode.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["episode.mkv"], "media_type": "tv", "tmdb_id": 1399,
+                   "season": 1, "start_episode": 1}
+        preview = helper.plan(self.root, request)
+        helper.organize(self.root_id, {**request, "token": preview["token"]})
+        edit = {"kind": "season-label", "label": "Temporada"}
+        edit_preview = helper.preview_edit(self.root, edit)
+        self.assertEqual(len(edit_preview["moves"]), 1)
+        helper.apply_edit(self.root_id, {**edit, "token": edit_preview["token"]})
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
+            path = conn.execute("SELECT file_path FROM episodes").fetchone()[0]
+        self.assertIn("/Temporada 1/", path)
+        self.assertTrue((self.root / path).is_file())
+        self.assertEqual(helper.catalog_settings(self.root)["labels"]["season_label"], "Temporada")
+        self.assertEqual(helper.scan(self.root)["pending"], 0)
+
+    def test_metadata_recovery_rolls_back_uncommitted_folder_move(self):
+        conn = helper.init_db(self.root)
+        conn.close()
+        source = self.root / "Series" / "Show" / "Season 1"
+        target = self.root / "Series" / "Show" / "Temporada 1"
+        target.mkdir(parents=True)
+        (target / "episode.mkv").write_bytes(b"video")
+        helper.save_json(helper.journal_path(self.root_id), {"kind": "metadata", "operation_id": "not-committed",
+                                                              "moves": [{"from": str(source), "to": str(target)}]})
+        self.assertEqual(helper.recover(self.root_id)["status"], "rolled_back")
+        self.assertTrue((source / "episode.mkv").exists())
+        self.assertFalse(target.exists())
+
+    def test_metadata_recovery_keeps_committed_folder_move(self):
+        (self.root / "film.mkv").write_bytes(b"video")
+        request = {"root_id": self.root_id, "sources": ["film.mkv"], "media_type": "movie", "tmdb_id": 27205}
+        preview = helper.plan(self.root, request)
+        result = helper.organize(self.root_id, {**request, "token": preview["token"]})
+        edit = {"kind": "media-genres", "media_id": result["media_id"], "genre_ids": [878, 28]}
+        edit_preview = helper.preview_edit(self.root, edit)
+        helper.apply_edit(self.root_id, {**edit, "token": edit_preview["token"]})
+        with contextlib.closing(sqlite3.connect(self.root / "sorta.db")) as conn:
+            operation_id = conn.execute("SELECT value FROM settings WHERE key='cockpit_sorta_last_edit'").fetchone()[0]
+        helper.save_json(helper.journal_path(self.root_id), {"kind": "metadata", "operation_id": operation_id,
+                                                              "moves": edit_preview["moves"]})
+        self.assertEqual(helper.recover(self.root_id)["status"], "committed")
+        self.assertTrue(Path(edit_preview["moves"][0]["to"]).exists())
 
 
 if __name__ == "__main__":

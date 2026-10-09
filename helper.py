@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import datetime as dt
 import hashlib
@@ -30,7 +31,7 @@ except ImportError:  # Windows development tests; the deployed helper runs on Li
     import msvcrt
 
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 SCHEMA_VERSION = 4
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".webm"}
 SIDECAR_EXTS = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".nfo"}
@@ -627,18 +628,28 @@ def recover(root_id: str) -> dict[str, str]:
             return {"status": "none"}
         journal = json.loads(path.read_text(encoding="utf-8"))
         conn = db_connect(root)
-        if conn and committed(conn, journal):
-            write_manifest(root, conn)
-            status = "committed"
-        else:
-            rollback_moves(journal["plan"]["moves"])
-            poster = journal.get("poster_new")
-            if poster:
-                with contextlib.suppress(FileNotFoundError):
-                    (root / poster).unlink()
-            status = "rolled_back"
-        if conn:
-            conn.close()
+        try:
+            if journal.get("kind") == "metadata":
+                row = conn.execute("SELECT value FROM settings WHERE key='cockpit_sorta_last_edit'").fetchone() if conn else None
+                if row and row[0] == journal["operation_id"]:
+                    write_manifest(root, conn)
+                    status = "committed"
+                else:
+                    rollback_moves(journal["moves"])
+                    status = "rolled_back"
+            elif conn and committed(conn, journal):
+                write_manifest(root, conn)
+                status = "committed"
+            else:
+                rollback_moves(journal["plan"]["moves"])
+                poster = journal.get("poster_new")
+                if poster:
+                    with contextlib.suppress(FileNotFoundError):
+                        (root / poster).unlink()
+                status = "rolled_back"
+        finally:
+            if conn:
+                conn.close()
         path.unlink()
         return {"status": status}
 
@@ -718,6 +729,295 @@ def organize(root_id: str, request: dict[str, Any]) -> dict[str, Any]:
             conn.close()
 
 
+def catalog_connection(root: Path, readonly: bool = True) -> sqlite3.Connection | None:
+    conn = db_connect(root, readonly=readonly)
+    if conn and db_version(conn) != SCHEMA_VERSION:
+        version = db_version(conn)
+        conn.close()
+        raise SortaError(f"Banco com esquema {version}. Abra este disco no Sorta desktop atualizado (esperado: {SCHEMA_VERSION}).")
+    return conn
+
+
+def catalog_library(root: Path) -> dict[str, Any]:
+    conn = catalog_connection(root)
+    if conn is None:
+        return {"media": [], "total": 0}
+    try:
+        total = conn.execute("SELECT COUNT(*) FROM media").fetchone()[0]
+        rows = conn.execute("SELECT id,tmdb_id,media_type,title,original_title,runtime_minutes,folder_path,poster_path,poster_url,catalogued_at,is_new FROM media ORDER BY title COLLATE NOCASE,id LIMIT 5000").fetchall()
+        media = [dict(row) for row in rows]
+        by_id = {row["id"]: row for row in media}
+        for row in media:
+            row["genres"] = []
+        for row in conn.execute("SELECT mg.media_id,mg.genre_id,mg.is_primary,g.canonical_name,g.translated_name FROM media_genres mg JOIN genres g ON g.id=mg.genre_id AND g.media_type=mg.media_type"):
+            item = by_id.get(row["media_id"])
+            if item is not None:
+                item["genres"].append({"id": row["genre_id"], "canonical_name": row["canonical_name"],
+                                       "translated_name": row["translated_name"], "is_primary": bool(row["is_primary"])})
+        for row in media:
+            row["genres"].sort(key=lambda genre: (not genre["is_primary"],
+                               (genre["translated_name"] or genre["canonical_name"]).casefold(), genre["id"]))
+        return {"media": media, "total": total}
+    finally:
+        conn.close()
+
+
+def catalog_path(root: Path, relative: str) -> Path:
+    rel = Path(relative)
+    if rel.is_absolute() or not rel.parts or any(part in (".", "..", "") for part in rel.parts):
+        raise SortaError("Caminho do catálogo inválido.")
+    path = root / rel
+    if not path.resolve().is_relative_to(root):
+        raise SortaError("Caminho fora da pasta do catálogo.")
+    current = root
+    for part in rel.parts:
+        current = current / part
+        if current.is_symlink():
+            raise SortaError("Caminho do catálogo contém link simbólico.")
+    return path
+
+
+def catalog_poster(root: Path, media_id: int) -> dict[str, Any]:
+    conn = catalog_connection(root)
+    if conn is None:
+        raise SortaError("Este catálogo ainda não tem banco de dados.")
+    try:
+        row = conn.execute("SELECT poster_path,poster_url FROM media WHERE id=?", (media_id,)).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        raise SortaError("Mídia não encontrada no catálogo.")
+    if row["poster_path"]:
+        try:
+            path = catalog_path(root, row["poster_path"])
+            mime = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(path.suffix.casefold())
+            if mime and path.is_file() and path.stat().st_size <= 5_000_000:
+                return {"src": f"data:{mime};base64,{base64.b64encode(path.read_bytes()).decode('ascii')}", "local": True}
+        except (OSError, SortaError):
+            pass
+    url = row["poster_url"]
+    return {"src": url if isinstance(url, str) and url.startswith("https://image.tmdb.org/t/p/") else None, "local": False}
+
+
+def catalog_settings(root: Path) -> dict[str, Any]:
+    conn = catalog_connection(root)
+    if conn is None:
+        return {"labels": db_labels(None), "genres": []}
+    try:
+        genres = [dict(row) for row in conn.execute("SELECT id,media_type,canonical_name,translated_name FROM genres ORDER BY media_type,canonical_name COLLATE NOCASE")]
+        return {"labels": db_labels(conn), "genres": genres}
+    finally:
+        conn.close()
+
+
+def tmdb_genres(root: Path, media_type: str) -> list[dict[str, Any]]:
+    if media_type not in ("movie", "tv"):
+        raise SortaError("Tipo de mídia inválido.")
+    raw = tmdb_json(f"genre/{media_type}/list", config().get("tmdb_key", ""))
+    conn = catalog_connection(root)
+    try:
+        translated = {} if conn is None else {row["id"]: row["translated_name"] for row in conn.execute("SELECT id,translated_name FROM genres WHERE media_type=?", (media_type,))}
+        return [{"id": int(row["id"]), "canonical_name": str(row["name"]), "translated_name": translated.get(int(row["id"]))}
+                for row in raw.get("genres", []) if isinstance(row.get("id"), int) and row.get("name")]
+    finally:
+        if conn:
+            conn.close()
+
+
+def catalog_folder_move(root: Path, old_relative: str, new_relative: str) -> dict[str, str] | None:
+    source = catalog_path(root, old_relative)
+    target = catalog_path(root, new_relative)
+    if source == target:
+        return None
+    if not source.is_dir():
+        raise SortaError(f"Pasta catalogada ausente: {source}")
+    return {"from": str(source), "to": str(target)}
+
+
+def edit_plan(root: Path, conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, Any]:
+    kind = request.get("kind")
+    plan: dict[str, Any] = {"kind": kind, "moves": [], "folder_updates": [], "episode_updates": []}
+    labels = db_labels(conn)
+    if kind == "media-genres":
+        media_id = request.get("media_id")
+        ids = request.get("genre_ids")
+        if type(media_id) is not int or media_id <= 0 or not isinstance(ids, list) or not ids or len(ids) > 30 \
+                or any(type(value) is not int or value <= 0 for value in ids) or len(set(ids)) != len(ids):
+            raise SortaError("Selecione gêneros válidos, sem repetição. O primeiro é o principal.")
+        media = conn.execute("SELECT id,media_type,folder_path FROM media WHERE id=?", (media_id,)).fetchone()
+        if media is None:
+            raise SortaError("Mídia não encontrada no catálogo.")
+        known = {row["id"]: dict(row) for row in conn.execute("SELECT id,canonical_name,translated_name FROM genres WHERE media_type=?", (media["media_type"],))}
+        if any(genre_id not in known for genre_id in ids):
+            raw = tmdb_json(f"genre/{media['media_type']}/list", config().get("tmdb_key", ""))
+            remote = {row["id"]: str(row["name"]) for row in raw.get("genres", []) if type(row.get("id")) is int and row.get("name")}
+            for genre_id in ids:
+                if genre_id not in known:
+                    if genre_id not in remote:
+                        raise SortaError(f"Gênero TMDB {genre_id} indisponível.")
+                    known[genre_id] = {"id": genre_id, "canonical_name": remote[genre_id], "translated_name": None}
+        old = list(conn.execute("SELECT genre_id,is_primary FROM media_genres WHERE media_id=?", (media_id,)))
+        old_primary = next((row["genre_id"] for row in old if row["is_primary"]), None)
+        plan.update({"media_id": media_id, "media_type": media["media_type"], "genre_ids": ids,
+                     "genres": [known[genre_id] for genre_id in ids], "old_genres": [(row["genre_id"], row["is_primary"]) for row in old]})
+        if media["media_type"] == "movie":
+            primary = known[ids[0]]
+            display = primary["translated_name"] or primary["canonical_name"]
+            current = Path(media["folder_path"])
+            new_relative = (Path(sanitize(labels["movies_folder_label"])) / sanitize(display) / current.name).as_posix()
+            move = catalog_folder_move(root, media["folder_path"], new_relative)
+            if move:
+                plan["moves"].append(move)
+                plan["folder_updates"].append({"media_id": media_id, "old": media["folder_path"], "new": new_relative})
+        plan["no_change"] = {row["genre_id"] for row in old} == set(ids) and old_primary == ids[0] and not plan["moves"]
+        plan["summary"] = "Atualizar gêneros desta mídia"
+    elif kind == "genre-translation":
+        genre_id = request.get("genre_id")
+        media_type = request.get("media_type")
+        translated = str(request.get("translated", "")).strip() or None
+        if type(genre_id) is not int or genre_id <= 0 or media_type not in ("movie", "tv") \
+                or (translated is not None and (len(translated) > 80 or sanitize(translated) == "_")):
+            raise SortaError("Nome de gênero inválido.")
+        genre = conn.execute("SELECT canonical_name,translated_name FROM genres WHERE id=? AND media_type=?", (genre_id, media_type)).fetchone()
+        if genre is None:
+            raise SortaError("Gênero não encontrado no catálogo.")
+        plan.update({"genre_id": genre_id, "media_type": media_type, "translated": translated,
+                     "old_translation": genre["translated_name"]})
+        if media_type == "movie" and translated != genre["translated_name"]:
+            display = translated or genre["canonical_name"]
+            movies_root = Path(sanitize(labels["movies_folder_label"])) / sanitize(display)
+            rows = conn.execute("SELECT m.id,m.folder_path FROM media m JOIN media_genres mg ON mg.media_id=m.id WHERE m.media_type='movie' AND mg.genre_id=? AND mg.media_type='movie' AND mg.is_primary=1", (genre_id,))
+            for media in rows:
+                new_relative = (movies_root / Path(media["folder_path"]).name).as_posix()
+                move = catalog_folder_move(root, media["folder_path"], new_relative)
+                if move:
+                    plan["moves"].append(move)
+                    plan["folder_updates"].append({"media_id": media["id"], "old": media["folder_path"], "new": new_relative})
+        plan["no_change"] = translated == genre["translated_name"]
+        plan["summary"] = "Atualizar tradução do gênero"
+    elif kind == "season-label":
+        label = str(request.get("label", "")).strip()
+        if not label or len(label) > 80 or sanitize(label) == "_":
+            raise SortaError("Informe um nome de temporada válido (até 80 caracteres).")
+        old_label = labels["season_label"]
+        plan.update({"label": label, "old_label": old_label})
+        if label != old_label:
+            for media in conn.execute("SELECT id,folder_path FROM media WHERE media_type='tv'"):
+                series = catalog_path(root, media["folder_path"])
+                if not series.is_dir():
+                    raise SortaError(f"Pasta da série catalogada ausente: {series}")
+                old_prefix = sanitize(old_label) + " "
+                for child in series.iterdir():
+                    if not child.is_dir() or child.is_symlink() or not child.name.startswith(old_prefix) or not child.name[len(old_prefix):].isdigit():
+                        continue
+                    old_relative = child.relative_to(root).as_posix()
+                    new_relative = (Path(media["folder_path"]) / (sanitize(label) + " " + child.name[len(old_prefix):])).as_posix()
+                    move = catalog_folder_move(root, old_relative, new_relative)
+                    if move:
+                        plan["moves"].append(move)
+                        for episode in conn.execute("SELECT id,file_path,still_path FROM episodes WHERE media_id=?", (media["id"],)):
+                            file_path, still_path = episode["file_path"], episode["still_path"]
+                            new_file = new_relative + file_path[len(old_relative):] if file_path and file_path.startswith(old_relative + "/") else file_path
+                            new_still = new_relative + still_path[len(old_relative):] if still_path and still_path.startswith(old_relative + "/") else still_path
+                            if (new_file, new_still) != (file_path, still_path):
+                                plan["episode_updates"].append({"id": episode["id"], "old_file": file_path,
+                                                                "new_file": new_file, "old_still": still_path, "new_still": new_still})
+        plan["no_change"] = label == old_label
+        plan["summary"] = "Renomear pastas de temporada deste catálogo"
+    else:
+        raise SortaError("Edição de catálogo desconhecida.")
+    if plan["moves"]:
+        check_conflicts(plan["moves"])
+    plan["source_state"] = [{"path": move["from"], "mtime_ns": Path(move["from"]).stat().st_mtime_ns}
+                            for move in plan["moves"]]
+    plan["token"] = hashlib.sha256(json.dumps(plan, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return plan
+
+
+def preview_edit(root: Path, request: dict[str, Any]) -> dict[str, Any]:
+    conn = catalog_connection(root)
+    if conn is None:
+        raise SortaError("Este catálogo ainda não tem banco de dados.")
+    try:
+        return edit_plan(root, conn, request)
+    finally:
+        conn.close()
+
+
+def apply_edit(root_id: str, request: dict[str, Any]) -> dict[str, Any]:
+    with root_lock(root_id):
+        root = verify_root(root_by_id(root_id))
+        if journal_path(root_id).exists():
+            raise SortaError("Há uma operação pendente. Use Recuperar antes de editar.")
+        conn = catalog_connection(root, readonly=False)
+        if conn is None:
+            raise SortaError("Este catálogo ainda não tem banco de dados.")
+        try:
+            plan = edit_plan(root, conn, request)
+            if plan["token"] != request.get("token"):
+                raise SortaError("A prévia mudou. Revise a edição antes de confirmar.")
+            if plan["no_change"]:
+                return {"changed": False}
+            backup = backup_db(root, root_id)
+            operation_id = uuid.uuid4().hex
+            save_json(journal_path(root_id), {"kind": "metadata", "operation_id": operation_id,
+                                              "moves": plan["moves"], "backup": backup, "created_at": utc_now()})
+            moved: list[dict[str, str]] = []
+            committed_db = False
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                check_conflicts(plan["moves"])
+                for move in plan["moves"]:
+                    verify_root(root_by_id(root_id))
+                    source, target = Path(move["from"]), Path(move["to"])
+                    if not source.is_dir() or source.is_symlink():
+                        raise SortaError(f"Pasta catalogada mudou: {source}")
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if source.stat().st_dev != target.parent.stat().st_dev:
+                        raise SortaError("Origem e destino estão em sistemas de arquivos diferentes.")
+                    os.rename(source, target)
+                    moved.append(move)
+                if plan["kind"] == "media-genres":
+                    for genre in plan["genres"]:
+                        conn.execute("INSERT INTO genres(id,media_type,canonical_name) VALUES(?,?,?) ON CONFLICT(id,media_type) DO NOTHING",
+                                     (genre["id"], plan["media_type"], genre["canonical_name"]))
+                    conn.execute("DELETE FROM media_genres WHERE media_id=?", (plan["media_id"],))
+                    for index, genre_id in enumerate(plan["genre_ids"]):
+                        conn.execute("INSERT INTO media_genres(media_id,genre_id,media_type,is_primary) VALUES(?,?,?,?)",
+                                     (plan["media_id"], genre_id, plan["media_type"], int(index == 0)))
+                elif plan["kind"] == "genre-translation":
+                    conn.execute("UPDATE genres SET translated_name=? WHERE id=? AND media_type=?",
+                                 (plan["translated"], plan["genre_id"], plan["media_type"]))
+                else:
+                    conn.execute("INSERT INTO settings(key,value) VALUES('season_label',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (plan["label"],))
+                    for episode in plan["episode_updates"]:
+                        conn.execute("UPDATE episodes SET file_path=?,still_path=? WHERE id=?",
+                                     (episode["new_file"], episode["new_still"], episode["id"]))
+                for update in plan["folder_updates"]:
+                    cursor = conn.execute("UPDATE media SET folder_path=? WHERE id=? AND folder_path=?",
+                                          (update["new"], update["media_id"], update["old"]))
+                    if cursor.rowcount != 1:
+                        raise SortaError("A pasta da mídia mudou durante a edição.")
+                conn.execute("INSERT INTO settings(key,value) VALUES('cockpit_sorta_last_edit',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (operation_id,))
+                conn.commit()
+                committed_db = True
+                write_manifest(root, conn)
+                journal_path(root_id).unlink()
+                return {"changed": True, "moved_folders": len(plan["moves"]), "backup": backup}
+            except Exception:
+                if not committed_db:
+                    conn.rollback()
+                    try:
+                        verify_root(root_by_id(root_id))
+                        rollback_moves(moved)
+                        journal_path(root_id).unlink()
+                    except Exception:
+                        pass  # Keep journal for recovery.
+                raise
+        finally:
+            conn.close()
+
+
 def dispatch(command: str, request: dict[str, Any]) -> Any:
     if command == "status":
         data = config()
@@ -756,6 +1056,20 @@ def dispatch(command: str, request: dict[str, Any]) -> Any:
     root = verify_root(root_by_id(root_id))
     if command == "scan":
         return scan(root)
+    if command == "library":
+        return catalog_library(root)
+    if command == "poster":
+        return catalog_poster(root, int(request.get("media_id", 0)))
+    if command == "catalog-settings":
+        return catalog_settings(root)
+    if command == "tmdb-genres":
+        return tmdb_genres(root, str(request.get("media_type", "")))
+    if command == "preview-edit":
+        if journal_path(root_id).exists():
+            raise SortaError("Resolva a operação pendente antes de editar.")
+        return preview_edit(root, request)
+    if command == "apply-edit":
+        return apply_edit(root_id, request)
     if command == "preview":
         if journal_path(root_id).exists():
             raise SortaError("Resolva a operação pendente antes de organizar.")
